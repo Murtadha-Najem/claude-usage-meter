@@ -1,0 +1,12 @@
+{
+  "name": "claude-usage-meter",
+  "description": "A usage meter for Claude Code: what each request and session took of your plan limits",
+  "owner": { "name": "Murtadha Najem" },
+  "plugins": [
+    {
+      "name": "usage-meter",
+      "source": "./",
+      "description": "Shows what each request and each session took of your Claude plan's 5-hour and weekly limits"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# Each person's own data, written on their machine
+history.json
+accounts.json
+
+# Written by Claude Code when it loads the plugin
+.claude-plugin/types/
+
+__pycache__/
+*.pyc
+node_modules/
