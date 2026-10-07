@@ -21,6 +21,8 @@ const WARNED = 'warned:'
 const UUID = 'uuid:'
 // The account that usage from before the meter is counted on: the first one set up.
 const EARLIER = 'earlier-account'
+// The account last seen in a plain terminal, where nothing names it before the first reply.
+const TERMINAL = 'terminal-account'
 
 const MAX_REQUESTS = 100
 const SHOWN_REQUESTS = 10
@@ -481,6 +483,17 @@ const record = async ($: EngineInterface, measured: Measured, write = true) => {
     ...(seven.p === undefined || !isOwn ? {} : { p7: seven.p, r7: seven.r }),
   }
   myAccount = me ?? accountOf(point.r7) ?? myAccount
+
+  // A terminal session learns its account from its first reply. Until then
+  // it goes by the one the terminal used last, so a known account is not
+  // treated as new at the top of every conversation.
+  if ((await signedInAs($)) === undefined) {
+    if (accountOf(point.r7) !== undefined && write) {
+      await $.store.set(TERMINAL, myAccount)
+    } else {
+      myAccount ??= (await $.store.get(TERMINAL)) as number | undefined
+    }
+  }
   const last = own.at(-1)
   const hasMoved =
     write &&
@@ -529,12 +542,18 @@ const record = async ($: EngineInterface, measured: Measured, write = true) => {
     earlierUsd = 0
   }
 
-  const setup: SetupState =
-    account === undefined || (await planOf($, account)) === undefined
-      ? isSpending || (account !== undefined && (await $.store.get(`${SETUP}${account}`)) !== undefined)
-        ? 'running'
-        : 'waiting'
-      : 'done'
+  // The notice about the measurement is for an account the meter has never
+  // met. With no account known yet, it shows only on a machine where no
+  // account has ever been set up.
+  const hasPlan =
+    account === undefined
+      ? (await $.store.keys()).some(one => one.startsWith(PLAN))
+      : (await planOf($, account)) !== undefined
+  const setup: SetupState = hasPlan
+    ? 'done'
+    : isSpending || (account !== undefined && (await $.store.get(`${SETUP}${account}`)) !== undefined)
+      ? 'running'
+      : 'waiting'
   const shown: View = {
     requestUsd: Math.max(0, measured.usd - base),
     sessionUsd,
@@ -564,6 +583,29 @@ const record = async ($: EngineInterface, measured: Measured, write = true) => {
       await $.store.set(mark, full.key)
       $.ui.toast(`${shown.plan ?? 'This account'}: ${full.text}.`)
     }
+  }
+}
+
+// An account the meter has already watched needs no measurement: its own use
+// says which plan it is. Run as a session starts, so a known account never
+// sees the notice.
+const adoptKnownPlan = async ($: EngineInterface) => {
+  const account = (await signedInAs($))?.account ?? ((await $.store.get(TERMINAL)) as number | undefined)
+
+  if (account === undefined || (await planOf($, account)) !== undefined) {
+    return
+  }
+
+  const known = planFromUse(linesOf(await timelines($), account))
+
+  if (known === undefined) {
+    return
+  }
+
+  await $.store.set(`${PLAN}${account}`, known)
+
+  if ((await $.store.get(`${NAME}${account}`)) === undefined) {
+    await $.store.set(`${NAME}${account}`, PLANS[known].label)
   }
 }
 
@@ -765,6 +807,7 @@ export const register: Register = on => {
       // No history file: the session counts from what the meter has seen.
     }
 
+    await adoptKnownPlan($)
     await record($, await measure($), false)
     // An idle session would otherwise keep showing rates as they stood at its
     // last reply, while other sessions go on refining them.
