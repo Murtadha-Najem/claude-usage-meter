@@ -1,6 +1,6 @@
 {
   "name": "usage-meter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Shows what each request and each session took of your Claude plan's 5-hour and weekly limits",
   "author": { "name": "Murtadha Najem", "url": "https://github.com/Murtadha-Najem" },
   "homepage": "https://github.com/Murtadha-Najem/claude-usage-meter",

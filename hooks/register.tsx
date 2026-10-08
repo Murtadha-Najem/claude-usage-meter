@@ -29,6 +29,8 @@ const SHOWN_REQUESTS = 10
 const MAX_POINTS = 200
 const KEEP_MS = 15 * 24 * 60 * 60 * 1000
 const SAME_WINDOW_MS = 5 * 60 * 1000
+// Readings further apart than this had no session reporting in between.
+const QUIET_MS = 30 * 60 * 1000
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 const TEN_MINUTES = 10 * 60 * 1000
 const REFRESH_MS = 2 * 60 * 1000
@@ -37,7 +39,7 @@ const WARN_FIVE_HOUR = 90
 const WARN_WEEK = 95
 
 // What one point of each limit costs on each plan, in dollars of usage at API
-// prices. Measured on a Pro and a Max 5x account over two days of ordinary
+// prices. Measured on a Pro and a Max 5x account over three days of ordinary
 // use in October 2026; the Max 20x row is the 5x row times four, not measured.
 // These are starting figures only: each account's own use adjusts them.
 const PLANS = {
@@ -143,10 +145,13 @@ const totalAt = (lines: Point[][], t: number) =>
   lines.reduce((sum, line) => sum + usdAt(line, t), 0)
 
 // The stretches of use a limit was watched over: how many points it moved
-// and what every session on the account spent meanwhile. A limit moves in
-// whole points, so where inside a point it was first seen is unknown: each
-// stretch runs from the first move seen to the last, never from the first
-// reading.
+// and what every session on the account spent meanwhile. A window is every
+// reading that shares one reset time; within it a limit only rises, so a
+// reading below one already seen is a stale one from another session and is
+// left out. A window is cut where nothing reported for a while, since use
+// across such a gap may never have been metered. A limit moves in whole
+// points, so where inside a point it was first seen is unknown: each stretch
+// runs from the first move seen to the last, never from the first reading.
 const stretches = (lines: Point[][], kind: Kind) => {
   const readings: Reading[] = lines
     .flatMap(line =>
@@ -156,27 +161,43 @@ const stretches = (lines: Point[][], kind: Kind) => {
           : { t: point.t, p: point.p7, r: point.r7 ?? 0 },
       ),
     )
-    .filter((reading): reading is Reading => reading.p !== undefined)
+    .filter((reading): reading is Reading => reading.p !== undefined && reading.r !== 0)
     .sort((a, b) => a.t - b.t)
-  const spans: { last: Reading; from?: Reading; to?: Reading }[] = []
+  const windows = new Map<number, Reading[]>()
 
   for (const reading of readings) {
-    const span = spans.at(-1)
-    const isSame =
-      span !== undefined &&
-      Math.abs(reading.r - span.last.r) < SAME_WINDOW_MS &&
-      reading.p >= span.last.p - 0.5
+    const key = Math.round(reading.r / SAME_WINDOW_MS)
+    const rising = windows.get(key) ?? []
+    const last = rising.at(-1)
 
-    if (isSame) {
-      if (reading.p > span.last.p) {
+    if (last === undefined || reading.p >= last.p) {
+      rising.push(reading)
+    }
+
+    windows.set(key, rising)
+  }
+
+  const spans: { from?: Reading; to?: Reading }[] = []
+
+  for (const rising of windows.values()) {
+    let span: { from?: Reading; to?: Reading } = {}
+
+    rising.forEach((reading, i) => {
+      const before = rising[i - 1]
+
+      if (before === undefined) {
+        return
+      }
+
+      if (reading.t - before.t > QUIET_MS) {
+        spans.push(span)
+        span = {}
+      } else if (reading.p > before.p) {
         span.from ??= reading
         span.to = reading
       }
-
-      span.last = reading
-    } else {
-      spans.push({ last: reading })
-    }
+    })
+    spans.push(span)
   }
 
   return spans

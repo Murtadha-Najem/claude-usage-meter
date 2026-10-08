@@ -27,7 +27,14 @@ STORE = sorted(
 )
 WEEK = 7 * 24 * 3600 * 1000
 SAME_WINDOW = 5 * 60 * 1000
-MIN_POINTS = 3
+# Readings further apart than this had no session reporting in between, so
+# whatever the limit moved meanwhile is set apart as its own stretch.
+QUIET = 30 * 60 * 1000
+# A limit moves in whole points, so a stretch shorter than this is too coarse
+# to compare with the others. A stretch this far from the middle one is usage
+# the meter did not see (the phone app, claude.ai), as the meter itself treats it.
+MIN_POINTS = 10
+FAR = 3
 
 
 def account(r7):
@@ -60,6 +67,33 @@ def stamp(t):
     return time.strftime('%a %d %H:%M', time.localtime(t / 1000))
 
 
+def stretches(readings):
+    """Cuts an account's readings into stretches, as the meter does.
+
+    A window is every reading that shares one reset time. Within it the limit
+    only rises, so a reading below one already seen is a stale one from another
+    session and is left out. A window is cut only where nothing reported for a
+    while: use across such a gap may not have been metered at all.
+    """
+    windows = {}
+    for t, p, r in sorted(readings):
+        windows.setdefault(round(r / SAME_WINDOW), []).append((t, p))
+    out = []
+    for key in sorted(windows, key=lambda k: windows[k][0][0]):
+        rising = []
+        for reading in windows[key]:
+            if not rising or reading[1] >= rising[-1][1]:
+                rising.append(reading)
+        start = rising[0]
+        for before, after in zip(rising, rising[1:]):
+            if after[0] - before[0] > QUIET:
+                out.append((start, before, False))
+                out.append((before, after, True))
+                start = after
+        out.append((start, rising[-1], False))
+    return out
+
+
 def main():
     since = (time.time() - float(sys.argv[1]) * 3600) * 1000 if len(sys.argv) > 1 else 0
     with io.open(STORE[0], encoding='utf-8') as held:
@@ -75,35 +109,39 @@ def main():
         reset = next(p['r7'] for line in lines for p in line if p.get('r7'))
         print('\nAccount whose week resets %s (%d session runs)' % (time.strftime('%a %H:%M', time.localtime(reset / 1000)), len(lines)))
         for pk, rk, label in (('p5', 'r5', '5-hour'), ('p7', 'r7', 'week')):
-            readings = sorted((p['t'], p[pk], p.get(rk, 0)) for line in lines for p in line if p.get(pk) is not None)
-            spans = []
-            for reading in readings:
-                last = spans[-1][1] if spans else None
-                if last and abs(reading[2] - last[2]) < SAME_WINDOW and reading[1] >= last[1] - 0.5:
-                    spans[-1][1] = reading
-                else:
-                    spans.append([reading, reading])
-            rates = []
-            print('  %s windows:' % label)
-            for first, last in spans:
+            readings = [(p['t'], p[pk], p[rk]) for line in lines for p in line if p.get(pk) is not None and p.get(rk)]
+            found = []
+            for first, last, quiet in stretches(readings):
                 moved = last[1] - first[1]
-                spent = sum(usd_at(line, last[0]) - usd_at(line, first[0]) for line in lines)
-                if moved < 1:
-                    continue
+                if moved >= 1:
+                    spent = sum(usd_at(line, last[0]) - usd_at(line, first[0]) for line in lines)
+                    found.append((first, last, quiet, moved, spent))
+            firm = [spent / moved for _, _, quiet, moved, spent in found if moved >= MIN_POINTS and not quiet]
+            mid = statistics.median(firm) if firm else 0
+            rates, points, usd = [], 0, 0
+            print('  %s windows:' % label)
+            for first, last, quiet, moved, spent in found:
                 rate = spent / moved
-                firm = moved >= MIN_POINTS
-                if firm:
+                if quiet:
+                    note = '  (nothing reporting in between, not counted)'
+                elif moved < MIN_POINTS:
+                    note = '  (too short to count)'
+                elif not mid / FAR < rate < mid * FAR:
+                    note = '  (far from the rest: usage the meter did not see, not counted)'
+                else:
+                    note = ''
                     rates.append(rate)
+                    points += moved
+                    usd += spent
                 print('    %s to %s  moved %5.1f%%  metered $%7.2f  = $%.3f per 1%%%s' % (
-                    stamp(first[0]), stamp(last[0]), moved, spent, rate, '' if firm else '  (too short to count)'))
+                    stamp(first[0]), stamp(last[0]), moved, spent, rate, note))
             if len(rates) >= 2:
-                mid = statistics.median(rates)
                 spread = (max(rates) - min(rates)) / mid * 100
-                print('    => median $%.3f per 1%%, spread %.0f%% across %d windows' % (mid, spread, len(rates)))
+                print('    => $%.3f per 1%% over %d points, spread %.0f%% across %d stretches' % (usd / points, points, spread, len(rates)))
             elif rates:
-                print('    => one usable window only: $%.3f per 1%%, nothing to compare it with yet' % rates[0])
+                print('    => one usable stretch only: $%.3f per 1%%, nothing to compare it with yet' % rates[0])
             else:
-                print('    => no window moved %d points while watched' % MIN_POINTS)
+                print('    => no stretch moved %d points while watched' % MIN_POINTS)
 
 
 if __name__ == '__main__':
